@@ -71,7 +71,10 @@ with tabs[0]:
         price = df["Close"].iloc[-1]
         change = (price / df["Close"].iloc[-2] - 1) * 100 if len(df) > 1 else 0
         prefix = "$" if not t.endswith(("=X",)) and t != "BTC-USD" else ""
-        cols[i].metric(t, f"{prefix}{price:,.2f}", f"{change:+.2f}%")
+if not np.isnan(price):
+    cols[i].metric(t, f"{prefix}{price:,.2f}", f"{change:+.2f}%")
+else:
+    cols[i].metric(t, "N/A", "0.00%")
 
     st.subheader("Candlestick Chart")
     ticker = st.selectbox("Select asset", tickers, index=0)
