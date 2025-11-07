@@ -45,10 +45,17 @@ def load_history(ticker, period="5d", interval="1h"):
 @st.cache_data(ttl=300)
 def load_prices(tickers, period="1y", interval="1d"):
     df = yf.download(tickers, period=period, interval=interval, progress=False)
-    if isinstance(tickers, list) and len(tickers) > 1:
-        return df["Adj Close"].dropna(how="all")
+    
+    # 🛠 Fix for inconsistent Yahoo output
+    if "Adj Close" in df.columns:
+        df = df["Adj Close"]
+    elif isinstance(df, pd.Series):
+        df = df.to_frame(name="Adj Close")
     else:
-        return df["Adj Close"].to_frame().dropna()
+        df = df.select_dtypes(include=[np.number])
+    
+    return df.dropna(how="all")
+
 
 def pct(x):
     return f"{x*100:.2f}%"
