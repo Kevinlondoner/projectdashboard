@@ -1,0 +1,222 @@
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+import requests
+from datetime import datetime, timedelta
+# Sentiment pipeline is optional; importing lazily to avoid heavy startup
+# from transformers import pipeline
+
+# ---------------------------
+# CONFIG & THEME
+# ---------------------------
+st.set_page_config(page_title="Project Dashboard", layout="wide")
+st.markdown(
+    """
+    <style>
+    body {background-color: #0d1117; color: #f0f6fc;}
+    .stTabs [role="tablist"] button {color: #f0f6fc !important;}
+    .stTabs [role="tablist"] button[data-baseweb="tab"] {border: none;}
+    .stTextInput>div>div>input {background-color: #161b22; color: #f0f6fc;}
+    .stNumberInput input {background-color: #161b22; color: #f0f6fc;}
+    .stSelectbox div[data-baseweb="select"] {background-color: #161b22; color: #f0f6fc;}
+    .st-expanderContent {background-color: #0f1420;}
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+st.title("💼 Project Dashboard")
+st.caption("Understand markets. Empower decisions.")
+
+tabs = st.tabs(["📈 Markets", "💰 Portfolio", "📊 Correlation", "🗞️ News", "🎓 Learn", "🤖 AI Assistant"])
+
+REFRESH_SEC = st.sidebar.slider("Auto-refresh (seconds)", 30, 120, 60, help="Set how often data refreshes.")
+st.sidebar.success("🚀 Project Dashboard — Free Financial Terminal")
+
+# ---------------------------
+# Helper functions
+# ---------------------------
+@st.cache_data(ttl=300)
+def load_history(ticker, period="5d", interval="1h"):
+    return yf.download(ticker, period=period, interval=interval, progress=False)
+
+@st.cache_data(ttl=300)
+def load_prices(tickers, period="1y", interval="1d"):
+    df = yf.download(tickers, period=period, interval=interval, progress=False)
+    if isinstance(tickers, list) and len(tickers) > 1:
+        return df["Adj Close"].dropna(how="all")
+    else:
+        return df["Adj Close"].to_frame().dropna()
+
+def pct(x):
+    return f"{x*100:.2f}%"
+
+# ---------------------------
+# 1️⃣ MARKETS TAB
+# ---------------------------
+with tabs[0]:
+    st.header("Live Market Data")
+    tickers = ["AAPL", "BTC-USD", "^GSPC", "GBPUSD=X"]
+    data = {}
+    cols = st.columns(len(tickers))
+
+    for i, t in enumerate(tickers):
+        df = load_history(t, period="5d", interval="1h")
+        if df.empty:
+            cols[i].write(f"{t}: no data")
+            continue
+        data[t] = df
+        price = df["Close"].iloc[-1]
+        change = (price / df["Close"].iloc[-2] - 1) * 100 if len(df) > 1 else 0
+        prefix = "$" if not t.endswith(("=X",)) and t != "BTC-USD" else ""
+        cols[i].metric(t, f"{prefix}{price:,.2f}", f"{change:+.2f}%")
+
+    st.subheader("Candlestick Chart")
+    ticker = st.selectbox("Select asset", tickers, index=0)
+    df = data.get(ticker) or load_history(ticker, period="5d", interval="1h")
+    fig = go.Figure(data=[go.Candlestick(
+        x=df.index,
+        open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"]
+    )])
+    fig.update_layout(template="plotly_dark", height=500, margin=dict(l=10, r=10, t=30, b=10))
+    st.plotly_chart(fig, use_container_width=True)
+
+# ---------------------------
+# 2️⃣ PORTFOLIO TAB
+# ---------------------------
+with tabs[1]:
+    st.header("Portfolio Simulator (Advanced)")
+    st.write("Enter your portfolio assets and weights (%)")
+
+    default_assets = "AAPL,MSFT,TSLA,BTC-USD"
+    user_input = st.text_input("Tickers (comma-separated)", default_assets)
+    investment = st.number_input("Total investment amount ($):", 1000, 1_000_000, 10_000, step=500)
+
+    if user_input:
+        assets = [x.strip().upper() for x in user_input.split(",") if x.strip()]
+        weights = []
+        for a in assets:
+            weights.append(st.number_input(f"Weight for {a} (%)", 0.0, 100.0, 100/len(assets)))
+        weights = np.array(weights) / 100
+        if not np.isclose(weights.sum(), 1.0):
+            st.warning(f"Weights sum to {weights.sum():.2f}. They should sum to 1.0 (100%).")
+        # Download prices
+        prices = load_prices(assets, period="1y", interval="1d")
+        prices = prices.fillna(method="ffill").dropna()
+        returns = prices.pct_change().dropna()
+
+        # Align weights
+        aligned_assets = [c for c in prices.columns]
+        w_map = {a: w for a, w in zip(assets, weights)}
+        w = np.array([w_map.get(a, 0) for a in aligned_assets])
+
+        # Portfolio metrics
+        portfolio_returns = (returns * w).sum(axis=1)
+        cumulative = (1 + portfolio_returns).cumprod()
+        roi = cumulative.iloc[-1] - 1
+        vol = portfolio_returns.std() * np.sqrt(252) if not portfolio_returns.empty else 0
+        sharpe = ((portfolio_returns.mean() / portfolio_returns.std()) * np.sqrt(252)) if portfolio_returns.std() != 0 else 0
+
+        # Benchmark
+        bench = load_prices("^GSPC", period="1y", interval="1d").pct_change().dropna().squeeze()
+        benchmark_cum = (1 + bench).cumprod()
+
+        # KPIs
+        col1, col2, col3 = st.columns(3)
+        col1.metric("ROI", pct(roi))
+        col2.metric("Volatility (annualized)", pct(vol))
+        col3.metric("Sharpe Ratio", f"{sharpe:.2f}")
+
+        # Equity curve
+        st.subheader("Portfolio vs Benchmark (S&P 500)")
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=cumulative.index, y=cumulative, mode="lines", name="Portfolio"))
+        fig.add_trace(go.Scatter(x=benchmark_cum.index, y=benchmark_cum, mode="lines", name="S&P 500"))
+        fig.update_layout(template="plotly_dark", height=500, margin=dict(l=10, r=10, t=30, b=10), yaxis_title="Growth of $1")
+        st.plotly_chart(fig, use_container_width=True)
+
+# ---------------------------
+# 3️⃣ CORRELATION TAB
+# ---------------------------
+with tabs[2]:
+    st.header("Correlation Matrix")
+    tickers_input = st.text_input("Enter tickers (comma-separated)", "AAPL,MSFT,TSLA,BTC-USD")
+    if tickers_input:
+        tickers = [x.strip().upper() for x in tickers_input.split(",") if x.strip()]
+        prices = load_prices(tickers, period="6mo", interval="1d")
+        corr = prices.pct_change().dropna().corr()
+        st.dataframe(corr.style.background_gradient(cmap="RdYlGn"), use_container_width=True)
+
+# ---------------------------
+# 4️⃣ NEWS TAB
+# ---------------------------
+with tabs[3]:
+    st.header("Financial News Feed")
+    st.write("Headlines from NewsAPI + Reddit Finance")
+
+    # NewsAPI (optional; requires key). Store in Secrets as NEWS_API_KEY
+    news_key = st.secrets.get("NEWS_API_KEY", None)
+    if news_key:
+        try:
+            news_url = f"https://newsapi.org/v2/top-headlines?category=business&language=en&apiKey={news_key}"
+            r = requests.get(news_url, timeout=10)
+            if r.status_code == 200:
+                articles = r.json().get("articles", [])[:10]
+                for a in articles:
+                    title = a.get("title", "No title")
+                    url = a.get("url", "#")
+                    source = (a.get("source") or {}).get("name", "Source")
+                    published = a.get("publishedAt", "")[:10]
+                    st.markdown(f"**[{title}]({url})**  \n*{source}* — {published}")
+            else:
+                st.info("NewsAPI request failed. Check your API key or quota.")
+        except Exception as e:
+            st.info("Unable to fetch NewsAPI headlines right now.")
+    else:
+        st.warning("Add a NEWS_API_KEY in Streamlit Secrets to enable NewsAPI headlines.")
+
+    st.subheader("Reddit Finance")
+    try:
+        reddit = requests.get("https://www.reddit.com/r/investing/top.json?limit=8&t=day",
+                              headers={"User-agent": "Mozilla/5.0"}, timeout=10).json()
+        for post in reddit.get("data", {}).get("children", []):
+            p = post["data"]
+            st.markdown(f"- [{p.get('title')}]({'https://reddit.com' + p.get('permalink','')})")
+    except Exception:
+        st.info("Reddit headlines unavailable right now.")
+
+# ---------------------------
+# 5️⃣ LEARN TAB
+# ---------------------------
+with tabs[4]:
+    st.header("Financial Glossary")
+    glossary = {
+        "P/E Ratio": "Price-to-Earnings ratio — measures company valuation.",
+        "Volatility": "Statistical measure of price fluctuations.",
+        "Sharpe Ratio": "Risk-adjusted return metric; higher is better.",
+        "Beta": "Measures stock sensitivity to overall market movements.",
+        "ROI": "Return on Investment — percentage gain or loss."
+    }
+    for term, desc in glossary.items():
+        with st.expander(term):
+            st.write(desc)
+            st.markdown(f"[Learn more on Investopedia](https://www.investopedia.com/terms/{term.lower().replace(' ','-')}.asp)")
+
+# ---------------------------
+# 6️⃣ AI ASSISTANT TAB
+# ---------------------------
+with tabs[5]:
+    st.header("AI Market Assistant (Coming Soon)")
+    st.info("This feature will use OpenAI or HuggingFace to explain market trends and summarize news.")
+    st.text_input("Ask about a market topic (e.g., 'Explain inflation impact on stocks')", key="ai_q")
+    st.button("🔍 Analyze (demo mode)")
+
+# Auto-refresh hint (Streamlit doesn't auto-refresh natively; user can click 'R' to rerun)
+st.caption("Tip: Press **R** to refresh data on demand. Set the sidebar slider to control caching TTL.")streamlit
+yfinance
+plotly
+pandas
+numpy
+requests
